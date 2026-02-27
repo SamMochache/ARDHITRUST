@@ -8,6 +8,12 @@ import {
   MoonIcon } from
 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
+
+function scrollToSell() {
+  const el = document.getElementById('sell');
+  if (el) el.scrollIntoView({ behavior: 'smooth' });
+}
+
 export function Navbar() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
@@ -35,21 +41,18 @@ export function Navbar() {
 
           {/* Desktop Nav Links */}
           <div className="hidden md:flex items-center gap-8">
-            {['Browse Land', 'How It Works', 'Verify Land'].map((link) =>
+            {[
+              { label: 'Browse Land', href: '#listings' },
+              { label: 'How It Works', href: '#how-it-works' },
+              { label: 'Verify Land', href: '#' },
+            ].map(({ label, href }) =>
             <a
-              key={link}
-              href={link === 'How It Works' ? '#how-it-works' : '#'}
+              key={label}
+              href={href}
               className="text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-forest dark:hover:text-gold transition-colors">
-
-                {link}
-              </a>
+              {label}
+            </a>
             )}
-            {/* <a
-              href="#"
-              className="text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-forest dark:hover:text-gold transition-colors">
-
-              Sign In
-            </a> */}
           </div>
 
           {/* Desktop Right: Theme Toggle + CTA */}
@@ -64,50 +67,27 @@ export function Navbar() {
                 {theme === 'light' ?
                 <motion.div
                   key="moon"
-                  initial={{
-                    rotate: -90,
-                    opacity: 0
-                  }}
-                  animate={{
-                    rotate: 0,
-                    opacity: 1
-                  }}
-                  exit={{
-                    rotate: 90,
-                    opacity: 0
-                  }}
-                  transition={{
-                    duration: 0.2
-                  }}>
-
+                  initial={{ rotate: -90, opacity: 0 }}
+                  animate={{ rotate: 0, opacity: 1 }}
+                  exit={{ rotate: 90, opacity: 0 }}
+                  transition={{ duration: 0.2 }}>
                     <MoonIcon className="w-4 h-4 text-forest" />
                   </motion.div> :
-
                 <motion.div
                   key="sun"
-                  initial={{
-                    rotate: 90,
-                    opacity: 0
-                  }}
-                  animate={{
-                    rotate: 0,
-                    opacity: 1
-                  }}
-                  exit={{
-                    rotate: -90,
-                    opacity: 0
-                  }}
-                  transition={{
-                    duration: 0.2
-                  }}>
-
+                  initial={{ rotate: 90, opacity: 0 }}
+                  animate={{ rotate: 0, opacity: 1 }}
+                  exit={{ rotate: -90, opacity: 0 }}
+                  transition={{ duration: 0.2 }}>
                     <SunIcon className="w-4 h-4 text-gold" />
                   </motion.div>
                 }
               </AnimatePresence>
             </button>
 
-            <button className="px-5 py-2 text-sm font-semibold text-white bg-forest rounded-lg hover:bg-forest-light transition-colors">
+            <button
+              onClick={scrollToSell}
+              className="px-5 py-2 text-sm font-semibold text-white bg-forest rounded-lg hover:bg-forest-light transition-colors">
               List Property
             </button>
           </div>
@@ -123,43 +103,18 @@ export function Navbar() {
                 {theme === 'light' ?
                 <motion.div
                   key="moon-mobile"
-                  initial={{
-                    rotate: -90,
-                    opacity: 0
-                  }}
-                  animate={{
-                    rotate: 0,
-                    opacity: 1
-                  }}
-                  exit={{
-                    rotate: 90,
-                    opacity: 0
-                  }}
-                  transition={{
-                    duration: 0.2
-                  }}>
-
+                  initial={{ rotate: -90, opacity: 0 }}
+                  animate={{ rotate: 0, opacity: 1 }}
+                  exit={{ rotate: 90, opacity: 0 }}
+                  transition={{ duration: 0.2 }}>
                     <MoonIcon className="w-4 h-4 text-forest" />
                   </motion.div> :
-
                 <motion.div
                   key="sun-mobile"
-                  initial={{
-                    rotate: 90,
-                    opacity: 0
-                  }}
-                  animate={{
-                    rotate: 0,
-                    opacity: 1
-                  }}
-                  exit={{
-                    rotate: -90,
-                    opacity: 0
-                  }}
-                  transition={{
-                    duration: 0.2
-                  }}>
-
+                  initial={{ rotate: 90, opacity: 0 }}
+                  animate={{ rotate: 0, opacity: 1 }}
+                  exit={{ rotate: -90, opacity: 0 }}
+                  transition={{ duration: 0.2 }}>
                     <SunIcon className="w-4 h-4 text-gold" />
                   </motion.div>
                 }
@@ -170,10 +125,8 @@ export function Navbar() {
               className="p-2 rounded-lg text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#1F3D28] transition-colors"
               onClick={() => setIsMenuOpen(!isMenuOpen)}
               aria-label="Toggle menu">
-
               {isMenuOpen ?
               <XIcon className="w-5 h-5" /> :
-
               <MenuIcon className="w-5 h-5" />
               }
             </button>
@@ -185,41 +138,33 @@ export function Navbar() {
       <AnimatePresence>
         {isMenuOpen &&
         <motion.div
-          initial={{
-            opacity: 0,
-            height: 0
-          }}
-          animate={{
-            opacity: 1,
-            height: 'auto'
-          }}
-          exit={{
-            opacity: 0,
-            height: 0
-          }}
-          transition={{
-            duration: 0.2
-          }}
+          initial={{ opacity: 0, height: 0 }}
+          animate={{ opacity: 1, height: 'auto' }}
+          exit={{ opacity: 0, height: 0 }}
+          transition={{ duration: 0.2 }}
           className="md:hidden bg-white dark:bg-[#071210] border-t border-gray-100 dark:border-[#1F3D28] px-4 py-4 space-y-3 overflow-hidden">
 
-            {['Browse Land', 'How It Works', 'Verify Land', 'Sign In'].map(
-            (link) =>
-            <a
-              key={link}
-              href={link === 'How It Works' ? '#how-it-works' : '#'}
-              className="block py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-forest dark:hover:text-gold"
-              onClick={() => setIsMenuOpen(false)}>
-
-                  {link}
-                </a>
-
+          {[
+            { label: 'Browse Land', href: '#listings' },
+            { label: 'How It Works', href: '#how-it-works' },
+            { label: 'Verify Land', href: '#' },
+            { label: 'Sign In', href: '#' },
+          ].map(({ label, href }) =>
+          <a
+            key={label}
+            href={href}
+            className="block py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-forest dark:hover:text-gold"
+            onClick={() => setIsMenuOpen(false)}>
+            {label}
+          </a>
           )}
-            <button className="w-full mt-2 px-5 py-2.5 text-sm font-semibold text-white bg-forest rounded-lg hover:bg-forest-light transition-colors">
-              List Property
-            </button>
-          </motion.div>
+          <button
+            onClick={() => { setIsMenuOpen(false); scrollToSell(); }}
+            className="w-full mt-2 px-5 py-2.5 text-sm font-semibold text-white bg-forest rounded-lg hover:bg-forest-light transition-colors">
+            List Property
+          </button>
+        </motion.div>
         }
       </AnimatePresence>
     </nav>);
-
 }
