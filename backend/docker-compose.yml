@@ -1,0 +1,49 @@
+version: "3.9"
+services:
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes: [.:/app]
+    ports: ["8000:8000"]
+    env_file: .env
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_started }
+
+  worker:
+    build: { context: ., dockerfile: docker/Dockerfile.worker }
+    command: celery -A config worker -l info -Q default,verification,payments,ai_agents
+    volumes: [.:/app]
+    env_file: .env
+    depends_on: [redis, db]
+
+  beat:
+    build: { context: ., dockerfile: docker/Dockerfile.worker }
+    command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    volumes: [.:/app]
+    env_file: .env
+    depends_on: [redis]
+
+  db:
+    image: pgvector/pgvector:pg16
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    environment:
+      POSTGRES_DB: ardhitrust
+      POSTGRES_USER: ardhitrust
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ardhitrust"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    volumes: [redis_data:/data]
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+
+volumes:
+  postgres_data:
+  redis_data:
