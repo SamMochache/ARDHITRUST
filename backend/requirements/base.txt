@@ -19,3 +19,4 @@ django-encrypted-model-fields==0.6.*
 django-storages[s3]==1.14.*
 boto3==1.35.*
 django-celery-beat==2.7.*
+africastalking==1.2.*
