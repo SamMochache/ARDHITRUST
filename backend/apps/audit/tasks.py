@@ -1,35 +1,21 @@
 # apps/audit/tasks.py
 # FIX 3: Audit Log Archiving
+# FIX 5: Daily Fraud Scan
 #
-# PROBLEM SOLVED:
-#   AuditEvent never deletes records (compliance).
-#   At 1M users × 10 events/day = 10M rows/day = 3.6B rows/year.
-#   A 3.6B row table without archiving = slow queries, huge storage costs,
-#   backup times measured in hours.
+# BUG FIXED IN THIS VERSION:
+#   run_daily_fraud_scan previously called service.score_user() and then
+#   accessed the result as result["risk_score"] and result["signals"].
+#   FraudSignalService.score_user() returns a FraudResult *dataclass*,
+#   not a dict. Subscript access on a dataclass raises TypeError at runtime,
+#   which would silently kill the nightly fraud scan — Celery would log the
+#   error and move on, meaning no user would ever be flagged automatically.
 #
-# FIX APPLIED:
-#   Celery beat task runs nightly at 02:00 EAT.
-#   Records older than 90 days are serialised to JSON and uploaded to S3.
-#   After successful S3 upload, old records are deleted from PostgreSQL.
-#   PostgreSQL stays lean (last 90 days only = ~900M rows max at full scale).
-#   Full audit history lives in S3 indefinitely at ~$0.023/GB/month.
+#   Fixed to use attribute access: result.risk_score, result.signals,
+#   result.auto_action — matching the FraudResult dataclass definition.
 #
-# RESULT:
-#   PostgreSQL audit table stays under 100M rows at all times.
-#   Full compliance history preserved in S3.
-#   Query performance stays fast — no full-table scans on old data.
-#
-# SCHEDULE (add to config/celery.py):
-#   app.conf.beat_schedule = {
-#       "archive-audit-logs": {
-#           "task": "apps.audit.tasks.archive_old_audit_events",
-#           "schedule": crontab(hour=2, minute=0),  # 02:00 EAT nightly
-#       },
-#       "run-fraud-signals": {
-#           "task": "apps.audit.tasks.run_daily_fraud_scan",
-#           "schedule": crontab(hour=3, minute=0),  # 03:00 EAT nightly
-#       },
-#   }
+#   Also fixed: auto-reject logic now uses result.auto_action == "AUTO_REJECT"
+#   (the field already computed by FraudSignalService) rather than duplicating
+#   the threshold check (>= 80) here. Single source of truth.
 
 import json
 import logging
@@ -41,7 +27,7 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 ARCHIVE_AFTER_DAYS = 90
-BATCH_SIZE         = 10_000  # process in batches to avoid memory pressure
+BATCH_SIZE         = 10_000
 
 
 @shared_task(queue="default", max_retries=3, default_retry_delay=300)
@@ -49,10 +35,11 @@ def archive_old_audit_events():
     """
     Archive AuditEvent records older than 90 days to S3, then delete from DB.
     Runs in batches of 10,000 to keep memory usage flat.
+    Scheduled: 02:00 EAT nightly via Celery beat.
     """
     from apps.audit.models import AuditEvent
 
-    cutoff      = timezone.now() - timedelta(days=ARCHIVE_AFTER_DAYS)
+    cutoff         = timezone.now() - timedelta(days=ARCHIVE_AFTER_DAYS)
     total_archived = 0
     total_deleted  = 0
 
@@ -65,12 +52,13 @@ def archive_old_audit_events():
         if not batch:
             break
 
-        # Serialise batch to JSON lines format
         date_str   = timezone.now().strftime("%Y/%m/%d")
         batch_json = "\n".join(json.dumps(record, default=str) for record in batch)
-        s3_key     = f"audit-archive/{date_str}/batch_{batch[0]['created_at'].strftime('%H%M%S')}.jsonl"
+        s3_key     = (
+            f"audit-archive/{date_str}/"
+            f"batch_{batch[0]['created_at'].strftime('%H%M%S')}.jsonl"
+        )
 
-        # Upload to S3
         try:
             _upload_to_s3(s3_key, batch_json)
             total_archived += len(batch)
@@ -78,14 +66,15 @@ def archive_old_audit_events():
             logger.error(f"Archive upload failed for {s3_key}: {e}")
             break  # Don't delete what we couldn't archive
 
-        # Delete archived records
-        ids = [r["id"] for r in batch]
         # Use raw delete to bypass the immutability guard in AuditEvent.save()
+        ids           = [r["id"] for r in batch]
         deleted_count = AuditEvent.objects.filter(id__in=ids).delete()[0]
         total_deleted += deleted_count
         logger.info(f"Archived {len(batch)} audit events to s3://{s3_key}")
 
-    logger.info(f"Audit archive complete: {total_archived} archived, {total_deleted} deleted")
+    logger.info(
+        f"Audit archive complete: {total_archived} archived, {total_deleted} deleted"
+    )
     return {"archived": total_archived, "deleted": total_deleted}
 
 
@@ -104,40 +93,79 @@ def _upload_to_s3(key: str, content: str):
         Key=key,
         Body=content.encode("utf-8"),
         ContentType="application/x-ndjson",
-        StorageClass="STANDARD_IA",  # ~40% cheaper than STANDARD for archival
+        StorageClass="STANDARD_IA",
     )
 
 
-@shared_task(queue="default")
-def run_daily_fraud_scan():
+@shared_task(queue="default", bind=True, max_retries=3, default_retry_delay=60)
+def run_daily_fraud_scan(self):
     """
-    Nightly scan of new users and recent transactions for fraud signals.
-    See apps/accounts/services/fraud_signal_service.py
+    Nightly scan of users who submitted KYC in the last 24 hours.
+    Scheduled: 03:00 EAT nightly via Celery beat.
+
+    BUG FIX: FraudSignalService.score_user() returns a FraudResult dataclass.
+    Previous code accessed result["risk_score"] (dict syntax) which raises
+    TypeError on a dataclass. Fixed to use result.risk_score (attribute access).
+
+    Also uses result.auto_action instead of duplicating the >= 80 threshold.
     """
-    from apps.accounts.models import CustomUser, KYCProfile
+    from apps.accounts.models import KYCProfile
     from apps.accounts.services.fraud_signal_service import FraudSignalService
 
-    # Scan users who submitted KYC in the last 24 hours
-    cutoff = timezone.now() - timedelta(hours=24)
+    cutoff     = timezone.now() - timedelta(hours=24)
     recent_kyc = KYCProfile.objects.filter(
         submitted_at__gte=cutoff
     ).select_related("user")
 
     service = FraudSignalService()
+    checked = 0
     flagged = 0
+    errors  = 0
+
     for kyc in recent_kyc:
-        result = service.score_user(kyc.user)
-        if result["risk_score"] >= 50:
-            logger.warning(
-                f"FRAUD SIGNAL: user={kyc.user.email} "
-                f"score={result['risk_score']} signals={result['signals']}"
-            )
-            # Auto-flag for manual review if very high risk
-            if result["risk_score"] >= 80:
+        try:
+            # FIX: result is a FraudResult dataclass — use attribute access
+            result = service.score_user(kyc.user)
+            checked += 1
+
+            if result.risk_score >= 50:
+                logger.warning(
+                    f"FRAUD SIGNAL: user={kyc.user.email} "
+                    f"score={result.risk_score} "
+                    f"level={result.risk_level} "
+                    f"signals={result.signals}"
+                )
+
+            # FIX: use result.auto_action (already computed by FraudSignalService)
+            # rather than duplicating the threshold check here
+            if result.auto_action == "AUTO_REJECT":
                 kyc.status = "REJECTED"
-                kyc.rejection_reason = f"Auto-flagged: {', '.join(result['signals'])}"
+                kyc.rejection_reason = (
+                    f"Auto-flagged by fraud scan: {', '.join(result.signals)}"
+                )
                 kyc.save(update_fields=["status", "rejection_reason"])
                 flagged += 1
+                logger.warning(
+                    f"AUTO_REJECT applied: user={kyc.user.email} "
+                    f"score={result.risk_score}"
+                )
 
-    logger.info(f"Daily fraud scan: {recent_kyc.count()} users checked, {flagged} flagged")
-    return {"checked": recent_kyc.count(), "flagged": flagged}
+            elif result.auto_action == "FLAG_FOR_REVIEW":
+                # Don't auto-reject — flag for manual review in admin
+                # Audit event is already created inside score_user()
+                logger.info(
+                    f"FLAG_FOR_REVIEW: user={kyc.user.email} "
+                    f"score={result.risk_score}"
+                )
+
+        except Exception as e:
+            errors += 1
+            logger.exception(
+                f"Fraud scan failed for user {kyc.user_id}: {e}"
+            )
+
+    logger.info(
+        f"Daily fraud scan complete: "
+        f"{checked} checked, {flagged} auto-rejected, {errors} errors"
+    )
+    return {"checked": checked, "flagged": flagged, "errors": errors}
