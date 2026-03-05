@@ -1,0 +1,22 @@
+-r base.txt
+
+# Dev/test tools
+pytest==8.*
+pytest-django==4.9.*
+pytest-cov==5.*
+pytest-asyncio==0.24.*
+factory-boy==3.3.*
+
+# Linting & type checking
+ruff==0.6.*
+mypy==1.11.*
+django-stubs==5.*
+djangorestframework-stubs==3.*
+
+# Security scanning
+bandit==1.7.*
+pip-audit==2.*
+
+# Dev convenience
+ipython
+django-extensions==3.*

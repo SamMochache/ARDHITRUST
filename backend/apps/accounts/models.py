@@ -1,7 +1,10 @@
+# apps/accounts/models.py
 import uuid
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.db import models
 from encrypted_model_fields.fields import EncryptedCharField
+from .managers import CustomUserManager
+
 
 class UserRole(models.TextChoices):
     BUYER    = "BUYER"
@@ -10,25 +13,34 @@ class UserRole(models.TextChoices):
     SURVEYOR = "SURVEYOR"
     VALUER   = "VALUER"
 
+
 class CustomUser(AbstractBaseUser, PermissionsMixin):
-    id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    email       = models.EmailField(unique=True)
-    phone       = models.CharField(max_length=15, unique=True)
-    first_name  = models.CharField(max_length=100)
-    last_name   = models.CharField(max_length=100)
-    role        = models.CharField(max_length=20, choices=UserRole.choices, default=UserRole.BUYER)
+    id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    email      = models.EmailField(unique=True)
+    phone      = models.CharField(max_length=15, unique=True)
+    first_name = models.CharField(max_length=100)
+    last_name  = models.CharField(max_length=100)
+    role       = models.CharField(max_length=20, choices=UserRole.choices, default=UserRole.BUYER)
 
     # PII — AES-256 encrypted at column level
     national_id_encrypted = EncryptedCharField(max_length=20, blank=True)
 
-    is_active       = models.BooleanField(default=True)
-    is_staff        = models.BooleanField(default=False)
-    email_verified  = models.BooleanField(default=False)
-    phone_verified  = models.BooleanField(default=False)
-    created_at      = models.DateTimeField(auto_now_add=True)
+    is_active      = models.BooleanField(default=True)
+    is_staff       = models.BooleanField(default=False)
+    email_verified = models.BooleanField(default=False)
+    phone_verified = models.BooleanField(default=False)
+    created_at     = models.DateTimeField(auto_now_add=True)
+
+    objects = CustomUserManager()
 
     USERNAME_FIELD  = "email"
     REQUIRED_FIELDS = ["phone", "first_name", "last_name"]
+
+    def get_full_name(self):
+        return f"{self.first_name} {self.last_name}".strip()
+
+    def get_short_name(self):
+        return self.first_name
 
     class Meta:
         db_table = "accounts_user"
@@ -55,3 +67,6 @@ class KYCProfile(models.Model):
     rejection_reason  = models.TextField(blank=True)
     submitted_at      = models.DateTimeField(null=True, blank=True)
     reviewed_at       = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"KYC({self.user.email}, {self.status})"

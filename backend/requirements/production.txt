@@ -1,0 +1,6 @@
+-r base.txt
+
+gunicorn==22.*
+gevent==24.*
+sentry-sdk[django]==2.*
+django-prometheus==2.3.*
