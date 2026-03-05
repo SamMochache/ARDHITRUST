@@ -1,4 +1,4 @@
-# conftest.py
+# conftest.py  — must live at the backend/ root (same directory as manage.py)
 import pytest
 from django.contrib.auth import get_user_model
 
@@ -7,7 +7,8 @@ User = get_user_model()
 
 @pytest.fixture
 def buyer(db):
-    return User.objects.create_user(
+    from apps.accounts.models import KYCProfile
+    user = User.objects.create_user(
         email="buyer@test.com",
         phone="0712345678",
         first_name="Jane",
@@ -15,6 +16,8 @@ def buyer(db):
         role="BUYER",
         password="testpass123",
     )
+    KYCProfile.objects.get_or_create(user=user)
+    return user
 
 
 @pytest.fixture
@@ -28,8 +31,25 @@ def seller(db):
         role="SELLER",
         password="testpass123",
     )
-    kyc = KYCProfile.objects.create(user=user, status="APPROVED",
-                                     iprs_verified=True, kra_verified=True)
+    KYCProfile.objects.create(
+        user=user, status="APPROVED",
+        iprs_verified=True, kra_verified=True,
+    )
+    return user
+
+
+@pytest.fixture
+def admin_user(db):
+    user = User.objects.create_user(
+        email="admin@test.com",
+        phone="0712345680",
+        first_name="Admin",
+        last_name="User",
+        role="ADMIN",
+        password="testpass123",
+        is_staff=True,
+        is_superuser=True,
+    )
     return user
 
 
@@ -39,7 +59,7 @@ def property_obj(db, seller):
     return Property.objects.create(
         seller=seller,
         title="Test Plot Nairobi",
-        description="A test plot",
+        description="A beautiful test plot in Westlands",
         county="Nairobi",
         area_name="Westlands",
         lr_number="LR/123/456",
@@ -70,5 +90,13 @@ def buyer_client(api_client, buyer):
 def seller_client(api_client, seller):
     from rest_framework_simplejwt.tokens import RefreshToken
     token = RefreshToken.for_user(seller)
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {str(token.access_token)}")
+    return api_client
+
+
+@pytest.fixture
+def admin_client(api_client, admin_user):
+    from rest_framework_simplejwt.tokens import RefreshToken
+    token = RefreshToken.for_user(admin_user)
     api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {str(token.access_token)}")
     return api_client
