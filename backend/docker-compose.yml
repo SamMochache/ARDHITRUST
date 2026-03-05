@@ -1,31 +1,90 @@
+# docker-compose.yml — Production-grade with PgBouncer + Read Replica
+#
+# FIX 1: PgBouncer added between app and PostgreSQL (connection pooling)
+# FIX 7: db_replica service added (read replica for SELECT queries)
+#
+# DATABASE_URL in .env must now point to PgBouncer:
+#   DATABASE_URL=postgres://ardhitrust:pass@pgbouncer:6432/ardhitrust
+#   DATABASE_REPLICA_URL=postgres://ardhitrust:pass@db_replica:5432/ardhitrust
+
 version: "3.9"
+
 services:
+  # ── Web ──────────────────────────────────────────────────────────────────
   web:
     build:
       context: .
       dockerfile: docker/Dockerfile.web
-    command: python manage.py runserver 0.0.0.0:8000
+    command: gunicorn config.wsgi:application
+      --bind 0.0.0.0:8000
+      --workers 4
+      --worker-class gthread
+      --threads 2
+      --timeout 120
+      --access-logfile -
+      --error-logfile -
     volumes: [.:/app]
     ports: ["8000:8000"]
     env_file: .env
     depends_on:
-      db: { condition: service_healthy }
+      pgbouncer: { condition: service_started }
       redis: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  worker:
+  # ── Celery Workers (one per queue for independent scaling) ───────────────
+  worker_default:
     build: { context: ., dockerfile: docker/Dockerfile.worker }
-    command: celery -A config worker -l info -Q default,verification,payments,ai_agents
-    volumes: [.:/app]
+    command: celery -A config worker -l info -Q default --concurrency 4
     env_file: .env
-    depends_on: [redis, db]
+    depends_on: [redis, pgbouncer]
+
+  worker_verification:
+    build: { context: ., dockerfile: docker/Dockerfile.worker }
+    command: celery -A config worker -l info -Q verification --concurrency 8
+    env_file: .env
+    depends_on: [redis, pgbouncer]
+
+  worker_payments:
+    build: { context: ., dockerfile: docker/Dockerfile.worker }
+    command: celery -A config worker -l info -Q payments --concurrency 4
+    env_file: .env
+    depends_on: [redis, pgbouncer]
+
+  worker_ai:
+    build: { context: ., dockerfile: docker/Dockerfile.worker }
+    command: celery -A config worker -l info -Q ai_agents --concurrency 2
+    env_file: .env
+    depends_on: [redis, pgbouncer]
 
   beat:
     build: { context: ., dockerfile: docker/Dockerfile.worker }
-    command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
-    volumes: [.:/app]
+    command: celery -A config beat -l info
+      --scheduler django_celery_beat.schedulers:DatabaseScheduler
     env_file: .env
-    depends_on: [redis]
+    depends_on: [redis, pgbouncer]
 
+  # ── PgBouncer — FIX 1 ───────────────────────────────────────────────────
+  pgbouncer:
+    image: bitnami/pgbouncer:1.22.1
+    environment:
+      POSTGRESQL_HOST: db
+      POSTGRESQL_PORT: 5432
+      POSTGRESQL_DATABASE: ardhitrust
+      POSTGRESQL_USERNAME: ardhitrust
+      POSTGRESQL_PASSWORD: ${DB_PASSWORD}
+      PGBOUNCER_POOL_MODE: transaction
+      PGBOUNCER_MAX_CLIENT_CONN: 10000
+      PGBOUNCER_DEFAULT_POOL_SIZE: 50
+      PGBOUNCER_MIN_POOL_SIZE: 5
+    ports: ["6432:6432"]
+    depends_on:
+      db: { condition: service_healthy }
+
+  # ── Primary DB ──────────────────────────────────────────────────────────
   db:
     image: pgvector/pgvector:pg16
     volumes: [postgres_data:/var/lib/postgresql/data]
@@ -33,17 +92,70 @@ services:
       POSTGRES_DB: ardhitrust
       POSTGRES_USER: ardhitrust
       POSTGRES_PASSWORD: ${DB_PASSWORD}
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=4MB
+      -c wal_level=replica
+      -c max_wal_senders=3
+      -c max_replication_slots=3
+      -c hot_standby=on
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ardhitrust"]
       interval: 5s
       timeout: 5s
       retries: 5
 
+  # ── Read Replica — FIX 7 ────────────────────────────────────────────────
+  # In production (RDS/Cloud), use managed replicas instead.
+  # This shows the pattern — in AWS, DATABASE_REPLICA_URL points to
+  # a read replica endpoint and this service is removed.
+  db_replica:
+    image: pgvector/pgvector:pg16
+    volumes: [postgres_replica_data:/var/lib/postgresql/data]
+    environment:
+      POSTGRES_USER: ardhitrust
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_PRIMARY_HOST: db
+      POSTGRES_PRIMARY_PORT: 5432
+      POSTGRES_REPLICATION_USER: replicator
+      POSTGRES_REPLICATION_PASSWORD: ${REPLICATION_PASSWORD}
+    command: >
+      bash -c "
+      until pg_basebackup -h db -U replicator -D /var/lib/postgresql/data -P --wal-method=stream;
+      do sleep 5; done &&
+      echo 'primary_conninfo = host=db port=5432 user=replicator password=${REPLICATION_PASSWORD}'
+      >> /var/lib/postgresql/data/postgresql.auto.conf &&
+      touch /var/lib/postgresql/data/standby.signal &&
+      postgres"
+    depends_on:
+      db: { condition: service_healthy }
+
+  # ── Redis ────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     volumes: [redis_data:/data]
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD}
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
 
 volumes:
   postgres_data:
+  postgres_replica_data:
   redis_data:
