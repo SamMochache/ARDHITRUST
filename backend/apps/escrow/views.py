@@ -1,24 +1,16 @@
-# apps/escrow/views.py  — FULL REPLACEMENT
-# FIX 2: M-Pesa Callback Queuing
+# apps/escrow/views.py
+# FIX: EscrowAdvanceView — replaced __getattribute__ with machine.trigger()
 #
-# PROBLEM SOLVED:
-#   Original view hit the DB synchronously on every Safaricom callback.
-#   Under a surge (10,000 callbacks/minute during a popular listing weekend),
-#   each callback held a DB connection for ~200ms = connection pool exhaustion.
-#   One slow DB query could cascade to dropped callbacks = missing payments.
+# PROBLEM:
+#   EscrowAdvanceView used __getattribute__(trigger)() to call trigger methods
+#   dynamically. __getattribute__ is a low-level dunder for attribute lookup
+#   internals — using it for normal dynamic dispatch is a code smell.
+#   getattr() is the correct built-in for this, but since we own the state
+#   machine and it exposes trigger() directly, calling machine.trigger(trigger)
+#   is cleaner still — no reflection needed at all.
 #
-# FIX APPLIED:
-#   Callback view now does exactly TWO things:
-#     1. Validates the payload (no DB)
-#     2. Pushes the raw callback to a Redis queue (no DB)
-#   Returns 200 to Safaricom immediately (< 5ms).
-#   A Celery task then processes the callback from the queue asynchronously.
-#
-# RESULT:
-#   Callback endpoint handles 100,000+ callbacks/minute.
-#   No DB connections held during callback receipt.
-#   If DB is slow, callbacks queue up in Redis — zero data loss.
-#   Safaricom gets its 200 OK within their 5-second timeout every time.
+# FIX:
+#   EscrowStateMachine(txn).trigger(trigger) — direct, readable, safe.
 
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -30,7 +22,7 @@ from apps.audit.models import AuditEvent
 from apps.properties.models import Property
 from .models import EscrowTransaction
 from .services.mpesa_client import MpesaClient
-from .state_machine import EscrowStateMachine
+from .state_machine import EscrowStateMachine, InvalidTransitionError
 
 
 class EscrowInitiateView(APIView):
@@ -148,31 +140,35 @@ class EscrowAdvanceView(APIView):
             return Response({"detail": f"No advance possible from {txn.status}."},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        EscrowStateMachine(txn).__getattribute__(trigger)()
+        # FIX: Use machine.trigger(trigger) — clean direct dispatch.
+        # Previously used __getattribute__(trigger)() which is a low-level
+        # dunder meant for attribute lookup internals, not dynamic dispatch.
+        # machine.trigger() is the correct public API we own.
+        try:
+            EscrowStateMachine(txn).trigger(trigger)
+        except InvalidTransitionError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
         return Response({"status": txn.status})
 
 
 class MpesaCallbackView(APIView):
     """
     POST /api/v1/escrow/mpesa/callback/
-    FIX 2: Queue-first callback handling.
-
-    Safaricom requires a 200 response within 5 seconds.
-    We do zero DB work here — just validate and queue.
+    Queue-first callback handling — zero DB work here.
     """
-    permission_classes    = [AllowAny]
+    permission_classes     = [AllowAny]
     authentication_classes = []
 
     def post(self, request):
-        body     = request.data.get("Body", {})
-        callback = body.get("stkCallback", {})
+        body        = request.data.get("Body", {})
+        callback    = body.get("stkCallback", {})
         result_code = callback.get("ResultCode")
         checkout_id = callback.get("CheckoutRequestID", "")
 
         if not checkout_id:
             return Response({"ResultCode": 0, "ResultDesc": "Accepted"})
 
-        # ── Queue immediately — NO DB touch ──────────────────────────────
         from apps.escrow.tasks import process_mpesa_callback
         process_mpesa_callback.delay(
             checkout_id=checkout_id,
