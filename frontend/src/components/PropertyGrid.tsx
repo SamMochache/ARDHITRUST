@@ -1,29 +1,23 @@
 // src/components/PropertyGrid.tsx
-// ─────────────────────────────────────────────────────────────────────────────
-// Pure presentation component — no data, no filter logic.
+// FIX: FilterTabsProps.onTabChange typed as (tab: FilterTab) => void
+// instead of (tab: any) => void.
 //
-// WHAT CHANGED FROM ORIGINAL:
-//   - Mock data array removed → lives in src/data/properties.ts
-//   - Filter logic removed    → lives in src/hooks/usePropertyFilters.ts
-//   - FilterTab type removed  → lives in src/hooks/usePropertyFilters.ts
-//   - This file now only handles: rendering tabs, grid, and load-more button
+// PROBLEM:
+//   TypeScript strict mode is enabled in tsconfig.json. The `any` type
+//   on onTabChange defeated the type safety of the entire filter system —
+//   passing a random string to setActiveTab would compile without error.
 //
-// WIRING UP THE REAL API (when ready):
-//   Replace the MOCK_PROPERTIES import with a useProperties() hook call.
-//   The component and filter hook don't need to change at all.
-//   Example:
-//     const { data, isLoading } = useProperties({ status: "ACTIVE" });
-//     const properties = data?.results ?? [];
-// ─────────────────────────────────────────────────────────────────────────────
+// FIX:
+//   Import FilterTab from the hook and use it in FilterTabsProps.
+//   Now TypeScript will catch any caller passing an invalid tab value.
 
 import React from "react";
 import { motion } from "framer-motion";
 import { ChevronRightIcon } from "lucide-react";
 import { PropertyCard } from "./PropertyCard";
 import { MOCK_PROPERTIES } from "../data/properties";
-import { usePropertyFilters, FILTER_TABS } from "../hooks/usePropertyFilters";
+import { usePropertyFilters, FILTER_TABS, FilterTab } from "../hooks/usePropertyFilters";
 
-// Animation variants — defined outside component to avoid re-creation on render
 const gridVariants = {
   visible: {
     transition: { staggerChildren: 0.08 },
@@ -36,10 +30,7 @@ const cardVariants = {
 };
 
 export function PropertyGrid() {
-  // Data source: swap MOCK_PROPERTIES for API data when ready
   const properties = MOCK_PROPERTIES;
-
-  // Filter logic lives in the hook — component stays clean
   const { activeTab, setActiveTab, filteredProperties } =
     usePropertyFilters(properties);
 
@@ -47,7 +38,6 @@ export function PropertyGrid() {
     <section className="py-16 bg-white dark:bg-[#0A1A10]" id="listings">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
 
-        {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-8">
           <div>
             <h2 className="font-heading text-3xl sm:text-4xl font-bold text-gray-900 dark:text-white mb-2">
@@ -66,14 +56,12 @@ export function PropertyGrid() {
           </a>
         </div>
 
-        {/* Filter Tabs */}
         <FilterTabs
           tabs={FILTER_TABS}
           activeTab={activeTab}
           onTabChange={setActiveTab}
         />
 
-        {/* Property Grid */}
         <motion.div
           className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6"
           initial="hidden"
@@ -97,12 +85,10 @@ export function PropertyGrid() {
           ))}
         </motion.div>
 
-        {/* Empty state */}
         {filteredProperties.length === 0 && (
           <EmptyState activeTab={activeTab} />
         )}
 
-        {/* Load More */}
         <div className="flex justify-center mt-10">
           <button className="flex items-center gap-2 px-8 py-3 text-sm font-semibold text-forest dark:text-gold border-2 border-forest dark:border-gold rounded-xl hover:bg-forest hover:text-white dark:hover:bg-gold dark:hover:text-forest transition-colors">
             Load More Listings
@@ -115,12 +101,11 @@ export function PropertyGrid() {
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
-// Small focused components extracted to keep PropertyGrid readable.
 
 interface FilterTabsProps {
-  tabs: readonly string[];
-  activeTab: string;
-  onTabChange: (tab: any) => void;
+  tabs: readonly FilterTab[];       // FIX: was readonly string[]
+  activeTab: FilterTab;
+  onTabChange: (tab: FilterTab) => void;  // FIX: was (tab: any) => void
 }
 
 function FilterTabs({ tabs, activeTab, onTabChange }: FilterTabsProps) {
@@ -144,7 +129,7 @@ function FilterTabs({ tabs, activeTab, onTabChange }: FilterTabsProps) {
 }
 
 interface EmptyStateProps {
-  activeTab: string;
+  activeTab: FilterTab;             // FIX: was string — now properly typed
 }
 
 function EmptyState({ activeTab }: EmptyStateProps) {
