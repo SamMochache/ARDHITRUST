@@ -1,7 +1,15 @@
 # apps/messaging/tests_ws_rate_limiter.py
+# FIX: Updated fail-open tests to patch the correct module-level target.
 #
-# Tests for WebSocketRateLimiter — fully isolated from the consumer.
-# Uses Django's cache/Redis backend configured in test settings.
+# PROBLEM:
+#   Previous tests patched "apps.messaging.ws_rate_limiter.get_redis_connection"
+#   but the import was inside _get_redis() — a local import — so the patch
+#   target didn't exist in the module namespace and mocks never fired.
+#   With get_redis_connection now a module-level import, the patch target
+#   resolves correctly and the fail-open tests actually test what they claim.
+#
+#   We also add an explicit test that verifies the patch target resolves —
+#   i.e. that the mock actually intercepts the call rather than calling Redis.
 
 import pytest
 import time
@@ -13,6 +21,8 @@ from apps.messaging.ws_rate_limiter import (
     MAX_CONNECTIONS_PER_USER,
 )
 
+PATCH_TARGET = "apps.messaging.ws_rate_limiter.get_redis_connection"
+
 
 @pytest.fixture
 def limiter():
@@ -21,10 +31,7 @@ def limiter():
 
 @pytest.fixture
 def mock_redis(limiter):
-    """
-    Inject a mock Redis client so tests don't need a real Redis instance.
-    The mock uses a simple in-memory dict to simulate sorted sets and counters.
-    """
+    """Inject fake Redis so tests run without a real Redis instance."""
     store: dict = {}
 
     class FakePipeline:
@@ -55,58 +62,43 @@ def mock_redis(limiter):
             results = []
             for cmd in self._cmds:
                 if cmd[0] == "zremrangebyscore":
-                    key = cmd[1]
-                    store.setdefault(key, {})
+                    store.setdefault(cmd[1], {})
                     results.append(None)
                 elif cmd[0] == "zcard":
-                    key = cmd[1]
-                    results.append(len(store.get(key, {})))
+                    results.append(len(store.get(cmd[1], {})))
                 elif cmd[0] == "zadd":
-                    key = cmd[1]
-                    store.setdefault(key, {}).update(cmd[2])
+                    store.setdefault(cmd[1], {}).update(cmd[2])
                     results.append(1)
                 elif cmd[0] == "expire":
                     results.append(True)
                 elif cmd[0] == "incr":
                     key = cmd[1]
-                    store[key] = store.get(key, b"0")
-                    val = int(store[key]) + 1
+                    val = int(store.get(key, b"0")) + 1
                     store[key] = str(val).encode()
                     results.append(val)
             return results
 
     class FakeRedis:
-        def pipeline(self):
-            return FakePipeline()
-
-        def get(self, key):
-            return store.get(key)
-
+        def pipeline(self): return FakePipeline()
+        def get(self, key): return store.get(key)
         def incr(self, key):
             val = int(store.get(key, b"0")) + 1
             store[key] = str(val).encode()
             return val
-
         def decr(self, key):
             val = max(0, int(store.get(key, b"1")) - 1)
             store[key] = str(val).encode()
             return val
-
-        def expire(self, key, ttl):
-            return True
-
-        def zremrangebyscore(self, key, mn, mx):
-            store.setdefault(key, {})
-
-        def zcard(self, key):
-            return len(store.get(key, {}))
+        def expire(self, key, ttl): return True
+        def zremrangebyscore(self, key, mn, mx): store.setdefault(key, {})
+        def zcard(self, key): return len(store.get(key, {}))
 
     fake = FakeRedis()
     limiter._redis = fake
     return fake, store
 
 
-# ── Message rate limiting ─────────────────────────────────────────────────────
+# ── Message rate limiting ──────────────────────────────────────────────────────
 
 class TestMessageRateLimit:
 
@@ -118,28 +110,41 @@ class TestMessageRateLimit:
             assert limiter.allow_message("user-2") is True
 
     def test_message_at_limit_blocked(self, limiter, mock_redis):
-        # Send exactly MAX messages
         for _ in range(RATE_LIMIT_MAX_MESSAGES):
             limiter.allow_message("user-3")
-        # Next message should be blocked
         assert limiter.allow_message("user-3") is False
 
     def test_different_users_independent_limits(self, limiter, mock_redis):
-        # Exhaust user-4's limit
         for _ in range(RATE_LIMIT_MAX_MESSAGES):
             limiter.allow_message("user-4")
-        # user-5 should still be allowed
         assert limiter.allow_message("user-5") is True
 
     def test_fails_open_when_redis_down(self, limiter):
-        """If Redis is unavailable, messages should be allowed (fail open)."""
+        """
+        Verifies the module-level patch target resolves correctly.
+        If the import were still inside _get_redis(), this patch would
+        be a no-op and the test would attempt a real Redis connection,
+        raising a connection error rather than returning True.
+        """
+        limiter._redis = None  # force _get_redis() to call get_redis_connection
+        with patch(PATCH_TARGET, side_effect=Exception("Redis down")):
+            result = limiter.allow_message("user-6")
+        assert result is True  # fail open
+
+    def test_patch_target_is_intercepted(self, limiter):
+        """
+        Explicit test that the patch target actually intercepts the call.
+        If get_redis_connection were a local import, mock.call_count would be 0.
+        """
         limiter._redis = None
-        with patch("apps.messaging.ws_rate_limiter.get_redis_connection",
-                   side_effect=Exception("Redis down")):
-            assert limiter.allow_message("user-6") is True
+        mock_conn = MagicMock()
+        mock_conn.pipeline.return_value.execute.return_value = [None, 0, 1, True]
+        with patch(PATCH_TARGET, return_value=mock_conn) as mock_get:
+            limiter.allow_message("user-patch-test")
+        assert mock_get.call_count == 1  # patch was intercepted
 
 
-# ── Connection tracking ───────────────────────────────────────────────────────
+# ── Connection tracking ────────────────────────────────────────────────────────
 
 class TestConnectionTracking:
 
@@ -161,23 +166,20 @@ class TestConnectionTracking:
         limiter.register_connection("user-13")
         count_before = limiter.get_connection_count("user-13")
         limiter.release_connection("user-13")
-        count_after = limiter.get_connection_count("user-13")
-        assert count_after == count_before - 1
+        assert limiter.get_connection_count("user-13") == count_before - 1
 
     def test_release_never_goes_below_zero(self, limiter, mock_redis):
-        # Release without registering
         limiter.release_connection("user-14")
         assert limiter.get_connection_count("user-14") == 0
 
     def test_different_users_independent_connections(self, limiter, mock_redis):
         for _ in range(MAX_CONNECTIONS_PER_USER):
             limiter.register_connection("user-15")
-        # user-16 unaffected
         assert limiter.allow_connection("user-16") is True
 
     def test_fails_open_when_redis_down(self, limiter):
-        """If Redis is unavailable, connections should be allowed (fail open)."""
+        """Same patch target verification — connection tracking path."""
         limiter._redis = None
-        with patch("apps.messaging.ws_rate_limiter.get_redis_connection",
-                   side_effect=Exception("Redis down")):
-            assert limiter.allow_connection("user-17") is True
+        with patch(PATCH_TARGET, side_effect=Exception("Redis down")):
+            result = limiter.allow_connection("user-17")
+        assert result is True
